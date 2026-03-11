@@ -216,55 +216,81 @@ def categorize_for_budget(unified_category: str) -> str:
 
 def build_previous_month_budget_analysis(prev_month_df: pd.DataFrame,
                                         category_col: str,
-                                        categories_with_negatives: set) -> str:
-    """Build analysis of previous month spending vs where it could be cut."""
-    # Don't count large credits as spending
+                                        categories_with_negatives: set) -> tuple:
+    """
+    Build analysis of previous month net spending by category (excluding Other).
+    Returns (text_block, net_spending_dict) for use in summaries and Claude prompt.
+    """
     prev_month_df = prev_month_df.copy()
 
-    # Categorize by budget type
-    prev_month_df["Budget_Category"] = prev_month_df[category_col].apply(categorize_for_budget)
+    # Calculate net spending by unified category (excluding "Other")
+    net_spending = {}
+    for cat in sorted(prev_month_df[category_col].unique()):
+        # Skip the "Other" category
+        if cat.lower() == "other":
+            continue
 
-    # Group by budget category, sum positive amounts (actual spending)
-    budget_analysis = {}
-    for budget_cat in ["Food & Groceries", "Travel & Transportation", "Other Expenses"]:
-        cat_data = prev_month_df[prev_month_df["Budget_Category"] == budget_cat]
-        spending = cat_data[cat_data["Amount"] > 0]["Amount"].sum()
-        budget_analysis[budget_cat] = {
-            "spending": round(spending, 2),
-            "categories": []
+        cat_data = prev_month_df[prev_month_df[category_col] == cat]
+        positive = cat_data[cat_data["Amount"] > 0]["Amount"].sum()
+        negative = cat_data[cat_data["Amount"] < 0]["Amount"].sum()
+        net = positive + negative
+
+        net_spending[cat] = {
+            "positive": round(positive, 2),
+            "negative": round(negative, 2),
+            "net": round(net, 2)
         }
 
-        # Get breakdown by unified category
-        for unified_cat in cat_data[cat_data["Amount"] > 0][category_col].unique():
-            unified_spending = cat_data[
-                (cat_data[category_col] == unified_cat) &
-                (cat_data["Amount"] > 0)
-            ]["Amount"].sum()
-            budget_analysis[budget_cat]["categories"].append({
-                "name": unified_cat,
-                "spending": round(unified_spending, 2)
-            })
-
     # Build the text block
-    lines = ["=== PREVIOUS MONTH SPENDING BREAKDOWN (by actual spend, excluding large credits) ==="]
+    lines = ["=== PREVIOUS MONTH NET SPENDING BY CATEGORY (excluding Other category) ==="]
     lines.append("")
 
-    total_spending = 0
-    for budget_cat in ["Food & Groceries", "Travel & Transportation", "Other Expenses"]:
-        spending = budget_analysis[budget_cat]["spending"]
-        total_spending += spending
-        lines.append(f"{budget_cat}: ${spending:,.2f}")
+    total_net = 0
+    for cat in sorted(net_spending.keys()):
+        data = net_spending[cat]
+        total_net += data["net"]
 
-        # Show subcategories
-        for item in sorted(budget_analysis[budget_cat]["categories"],
-                          key=lambda x: x["spending"], reverse=True):
-            lines.append(f"  • {item['name']}: ${item['spending']:,.2f}")
-        lines.append("")
+        if data["negative"] != 0:
+            lines.append(
+                f"{cat}: ${data['positive']:,.2f} (spend) + ${data['negative']:,.2f} (credits) = ${data['net']:,.2f} (net)"
+            )
+        else:
+            lines.append(f"{cat}: ${data['net']:,.2f}")
 
-    lines.append(f"TOTAL ACTUAL SPENDING (excluding large credits): ${total_spending:,.2f}")
     lines.append("")
-    lines.append("Analysis: This shows where your actual discretionary spending went.")
-    lines.append("Use this to identify which categories consistently overspend and where to cut back.")
+    lines.append(f"TOTAL NET SPENDING (excluding Other): ${total_net:,.2f}")
+    lines.append("")
+    lines.append("This net spending is what actually left your account for each category,")
+    lines.append("accounting for refunds and credits. Use this for budget analysis.")
+
+    return "\n".join(lines), net_spending
+
+
+def build_budget_analysis_prompt_section(net_spending: dict, budget_amount: float) -> str:
+    """Build the budget analysis section for Claude's prompt."""
+    lines = ["=== PREVIOUS MONTH BUDGET ANALYSIS (for budget planning) ==="]
+    lines.append(f"Total monthly discretionary budget: ${budget_amount:,.2f}")
+    lines.append("")
+    lines.append("Previous month net spending by category (excluding Other category):")
+    lines.append("")
+
+    total_net = 0
+    for cat in sorted(net_spending.keys()):
+        data = net_spending[cat]
+        total_net += data["net"]
+        lines.append(f"  {cat}: ${data['net']:,.2f}")
+
+    lines.append("")
+    lines.append(f"Total: ${total_net:,.2f}")
+    lines.append("")
+
+    # Calculate how much over/under
+    difference = budget_amount - total_net
+    status = "UNDER" if difference > 0 else "OVER"
+    lines.append(f"Previous month was ${abs(difference):,.2f} {status} budget")
+    lines.append("")
+    lines.append("Analyze which categories were the biggest drivers of overspending")
+    lines.append("and recommend where to cut back to stay within budget.")
 
     return "\n".join(lines)
 
@@ -272,9 +298,11 @@ def build_previous_month_budget_analysis(prev_month_df: pd.DataFrame,
 def build_prompt(current_label: str, previous_label: str,
                 current_summary: dict, previous_summary: dict,
                 current_pace: dict, budget_amount: float,
-                prev_month_budget_analysis: str) -> str:
+                prev_month_budget_analysis: str, net_spending: dict) -> str:
     current_block = format_category_block(f"CURRENT MONTH ({current_label})", {**current_summary})
     previous_block = format_category_block(f"PREVIOUS MONTH ({previous_label})", {**previous_summary})
+
+    budget_analysis_section = build_budget_analysis_prompt_section(net_spending, budget_amount)
 
     pace_info = f"""
 === CURRENT MONTH BUDGET ANALYSIS ===
@@ -297,9 +325,10 @@ Daily remaining: ${current_pace['daily_remaining']:,.2f}
 Your summary should:
 1. Open with a short high-level overview of current month spending vs budget — am I on pace, over, or under?
 2. Break down the current month by category — how much in each area, any credits/refunds?
-3. Compare previous month performance — was it on budget or over? Point out which categories were spending the most.
-4. Provide actionable insights: if on pace, what areas to watch? If over, where to cut? If under, where the savings are. Reference the previous month breakdown to show patterns.
-5. Conclude with a brief outlook for the rest of the month.
+3. **BUDGET ANALYSIS:** Use the "PREVIOUS MONTH BUDGET ANALYSIS" section to analyze which categories overspent and where cuts should be made. Calculate how much each category was over/under budget.
+4. Compare previous month overall performance vs current month pacing.
+5. Provide actionable insights: if on pace, what areas to watch? If over, where to cut? If under, where the savings are. Reference the previous month breakdown to show patterns.
+6. Conclude with a brief outlook for the rest of the month.
 
 Use plain language, dollar amounts, and be concise. Focus on what's notable or actionable, not every single number.
 
@@ -310,6 +339,8 @@ Use plain language, dollar amounts, and be concise. Focus on what's notable or a
 {previous_block}
 
 {prev_month_budget_analysis}
+
+{budget_analysis_section}
 
 {pace_info}
 """
@@ -380,7 +411,7 @@ def main():
     current_pace = calculate_month_pace(current_month_df, current_month_ts, budget_amount)
 
     # Build previous month budget analysis
-    prev_month_budget_analysis = build_previous_month_budget_analysis(
+    prev_month_budget_analysis, net_spending = build_previous_month_budget_analysis(
         prev_month_df, category_col, categories_with_negatives
     )
 
@@ -415,7 +446,7 @@ def main():
 
     prompt = build_prompt(current_label, prev_label,
                          {**current_summary}, {**prev_summary},
-                         current_pace, budget_amount, prev_month_budget_analysis)
+                         current_pace, budget_amount, prev_month_budget_analysis, net_spending)
 
     print("=" * 60)
     print("Generating AI summary with Claude...")
@@ -454,6 +485,17 @@ def main():
     print(f"✓ Current month data exported to {current_csv}")
     print(f"✓ Previous month data exported to {prev_csv}")
 
+    # Export budget analysis data as JSON
+    budget_analysis_json = export_dir / f"budget_analysis_{prev_label}.json"
+    with open(budget_analysis_json, "w") as f:
+        json.dump({
+            "month": prev_label,
+            "budget": budget_amount,
+            "net_spending_by_category": net_spending,
+            "total_net_spending": round(sum(cat["net"] for cat in net_spending.values()), 2)
+        }, f, indent=2)
+    print(f"✓ Budget analysis exported to {budget_analysis_json}")
+
     # Save report to file
     output_file = export_dir / f"monthly_report_{current_label}.txt"
 
@@ -472,6 +514,8 @@ def main():
         f.write(format_category_block(f"PREVIOUS MONTH ({prev_label})", {**prev_summary}))
         f.write("\n\n")
         f.write(prev_month_budget_analysis)
+        f.write("\n\n")
+        f.write(build_budget_analysis_prompt_section(net_spending, budget_amount))
         f.write("\n\n")
         f.write(f"=== CURRENT MONTH BUDGET ANALYSIS ===\n")
         f.write(f"Budget for discretionary spending: ${budget_amount:,.2f}\n")
