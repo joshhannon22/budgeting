@@ -358,7 +358,7 @@ def main():
     notifier = Notifier()
     if notifier.is_enabled():
         notifier.send(
-            message=tldr_text,
+            message=summary_text,
             title=f"📊 Weekly Spending Report — {week1_label}"
         )
     else:

@@ -1,3 +1,5 @@
 transactions/
 weekly_exports/
 venv/
+monthly_exports/
+__pycache__/
