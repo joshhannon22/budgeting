@@ -12,6 +12,8 @@ from datetime import datetime
 import anthropic
 import pandas as pd
 
+from notifications import Notifier, build_tldr_prompt
+
 
 # ─────────────────────────────────────────────
 # Data extraction
@@ -473,6 +475,33 @@ def main():
     final = stream.get_final_message()
     print("\n")
 
+    # Generate TLDR for notifications
+    print("=" * 60)
+    print("Generating TLDR summary...")
+    print("=" * 60)
+    print()
+
+    tldr_prompt = build_tldr_prompt("monthly", format_category_block(f"CURRENT MONTH ({current_label})", {**current_summary}))
+
+    tldr_text = ""
+    with client.messages.stream(
+        model="claude-sonnet-4-6",
+        max_tokens=300,
+        system=(
+            "You are a concise personal finance assistant. "
+            "Generate very brief, actionable summaries."
+        ),
+        messages=[{"role": "user", "content": tldr_prompt}],
+    ) as stream:
+        for text in stream.text_stream:
+            print(text, end="", flush=True)
+            tldr_text += text
+
+    print("\n")
+
+    # Prepend TLDR to summary
+    full_summary_text = f"📱 TLDR\n{tldr_text}\n\n---\n\n{summary_text}"
+
     # Create monthly_exports directory
     export_dir = script_dir / "monthly_exports"
     export_dir.mkdir(parents=True, exist_ok=True)
@@ -505,7 +534,7 @@ def main():
         f.write(f"Previous Month: {prev_label} ({prev_start_str} to {prev_end_str})\n")
         f.write(f"Budget (leftover after fixed): ${budget_amount:,.2f}\n")
         f.write("=" * 60 + "\n\n")
-        f.write(summary_text)
+        f.write(full_summary_text)
         f.write("\n\n" + "=" * 60 + "\n")
         f.write("RAW DATA\n")
         f.write("=" * 60 + "\n\n")
@@ -532,6 +561,16 @@ def main():
 
     print(f"✓ Report saved to {output_file}")
     print(f"  Tokens used — input: {final.usage.input_tokens}, output: {final.usage.output_tokens}")
+
+    # Send notification
+    notifier = Notifier()
+    if notifier.is_enabled():
+        notifier.send(
+            message=tldr_text,
+            title=f"💰 Monthly Budget Report — {current_label}"
+        )
+    else:
+        print("⚠ Pushover notification not configured (set PUSHOVER_APP_TOKEN and PUSHOVER_USER_KEY)")
 
 
 if __name__ == "__main__":

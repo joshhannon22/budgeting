@@ -11,6 +11,8 @@ from pathlib import Path
 import anthropic
 import pandas as pd
 
+from notifications import Notifier, build_tldr_prompt
+
 
 # ─────────────────────────────────────────────
 # Data extraction
@@ -289,8 +291,34 @@ def main():
             summary_text += text
 
     final = stream.get_final_message()
+    print("\n")
+
+    # Generate TLDR for notifications
+    print("=" * 60)
+    print("Generating TLDR summary...")
+    print("=" * 60)
+    print()
+
+    tldr_prompt = build_tldr_prompt("weekly", format_category_block(f"WEEK 1 ({week1_label})", {**week1_summary}))
+
+    tldr_text = ""
+    with client.messages.stream(
+        model="claude-sonnet-4-6",
+        max_tokens=300,
+        system=(
+            "You are a concise personal finance assistant. "
+            "Generate very brief, actionable summaries."
+        ),
+        messages=[{"role": "user", "content": tldr_prompt}],
+    ) as stream:
+        for text in stream.text_stream:
+            print(text, end="", flush=True)
+            tldr_text += text
 
     print("\n")
+
+    # Prepend TLDR to summary
+    full_summary_text = f"📱 TLDR\n{tldr_text}\n\n---\n\n{summary_text}"
 
     # ── Create weekly_exports directory ──
     export_dir = Path(__file__).parent / "weekly_exports"
@@ -312,7 +340,7 @@ def main():
         f.write(f"Week 1: {week1_label} ({week1_start_str} to {week1_end_str})\n")
         f.write(f"Week 2: {week2_label} ({week2_start_str} to {week2_end_str})\n")
         f.write("=" * 60 + "\n\n")
-        f.write(summary_text)
+        f.write(full_summary_text)
         f.write("\n\n" + "=" * 60 + "\n")
         f.write("RAW DATA\n")
         f.write("=" * 60 + "\n\n")
@@ -325,6 +353,16 @@ def main():
 
     print(f"✓ Report saved to {output_file}")
     print(f"  Tokens used — input: {final.usage.input_tokens}, output: {final.usage.output_tokens}")
+
+    # Send notification
+    notifier = Notifier()
+    if notifier.is_enabled():
+        notifier.send(
+            message=tldr_text,
+            title=f"📊 Weekly Spending Report — {week1_label}"
+        )
+    else:
+        print("⚠ Pushover notification not configured (set PUSHOVER_APP_TOKEN and PUSHOVER_USER_KEY)")
 
 
 if __name__ == "__main__":
