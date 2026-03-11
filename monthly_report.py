@@ -7,7 +7,6 @@ analyzes previous month performance, and generates a human-readable summary with
 import json
 import os
 from pathlib import Path
-from datetime import datetime
 
 import anthropic
 import pandas as pd
@@ -88,11 +87,9 @@ def calculate_month_pace(current_month_df: pd.DataFrame,
     if current_month_ts.year == today.year and current_month_ts.month == today.month:
         # Current month is ongoing
         days_elapsed = today.day
-        max_date = today
     else:
         # Month is complete or partially complete based on data
         days_elapsed = days_in_month
-        max_date = current_month_df["Date"].max() if len(current_month_df) > 0 else current_month_ts
 
     # Total spending (sum of positive amounts)
     total_spending = current_month_df[current_month_df["Amount"] > 0]["Amount"].sum()
@@ -217,8 +214,7 @@ def categorize_for_budget(unified_category: str) -> str:
 
 
 def build_previous_month_budget_analysis(prev_month_df: pd.DataFrame,
-                                        category_col: str,
-                                        categories_with_negatives: set) -> tuple:
+                                        category_col: str) -> tuple:
     """
     Build analysis of previous month net spending by category (excluding Other).
     Returns (text_block, net_spending_dict) for use in summaries and Claude prompt.
@@ -414,7 +410,7 @@ def main():
 
     # Build previous month budget analysis
     prev_month_budget_analysis, net_spending = build_previous_month_budget_analysis(
-        prev_month_df, category_col, categories_with_negatives
+        prev_month_df, category_col
     )
 
     # Print structured data
